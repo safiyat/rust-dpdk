@@ -337,7 +337,10 @@ impl Port {
     /// Returns true if link is up (connected), false if down.
     #[inline]
     pub fn is_link_up(&self) -> bool {
-        self.get_link().link_status() == dpdk_sys::ETH_LINK_UP as u16
+        let link = self.get_link();
+        // Safety: both union variants are plain integers.
+        let status = unsafe { link.__bindgen_anon_1.__bindgen_anon_1.link_status() };
+        status == dpdk_sys::RTE_ETH_LINK_UP as u16
     }
 }
 
@@ -448,15 +451,19 @@ impl UninitPort {
             some_port_conf
         } else {
             let mut port_conf = RteEthConf::new();
-            port_conf.data.rxmode.max_rx_pkt_len = dpdk_sys::RTE_ETHER_MAX_LEN;
-            port_conf.data.rxmode.mq_mode = dpdk_sys::rte_eth_rx_mq_mode_ETH_MQ_RX_NONE;
-            port_conf.data.txmode.mq_mode = dpdk_sys::rte_eth_tx_mq_mode_ETH_MQ_TX_NONE;
+            // DPDK 21.11 replaced max_rx_pkt_len with mtu.
+            port_conf.data.rxmode.mtu = dpdk_sys::RTE_ETHER_MAX_LEN
+                - dpdk_sys::RTE_ETHER_HDR_LEN
+                - dpdk_sys::RTE_ETHER_CRC_LEN;
+            port_conf.data.rxmode.mq_mode = dpdk_sys::rte_eth_rx_mq_mode_RTE_ETH_MQ_RX_NONE;
+            port_conf.data.txmode.mq_mode = dpdk_sys::rte_eth_tx_mq_mode_RTE_ETH_MQ_TX_NONE;
             if rx_queue_count > 1 {
                 // Enable RSS.
-                port_conf.data.rxmode.mq_mode = dpdk_sys::rte_eth_rx_mq_mode_ETH_MQ_RX_RSS;
-                port_conf.data.rx_adv_conf.rss_conf.rss_hf = (dpdk_sys::ETH_RSS_NONFRAG_IPV4_UDP
-                    | dpdk_sys::ETH_RSS_NONFRAG_IPV4_TCP)
-                    .into();
+                port_conf.data.rxmode.mq_mode = dpdk_sys::rte_eth_rx_mq_mode_RTE_ETH_MQ_RX_RSS;
+                // RTE_ETH_RSS_* are RTE_BIT64() macros, which bindgen cannot expand.
+                port_conf.data.rx_adv_conf.rss_conf.rss_hf = (1u64
+                    << dpdk_sys::RTE_ETH_FLOW_NONFRAG_IPV4_UDP)
+                    | (1u64 << dpdk_sys::RTE_ETH_FLOW_NONFRAG_IPV4_TCP);
                 // TODO set symmetric RSS for TCP/IP
             }
             port_conf

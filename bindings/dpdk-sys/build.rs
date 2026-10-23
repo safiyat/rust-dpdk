@@ -109,7 +109,8 @@ impl State {
         index: &'a clang::Index,
         header_path: &Path,
     ) -> clang::TranslationUnit<'a> {
-        let mut argument = vec!["-march=native".into()];
+        // DPDK only declares rte_cpuset_t APIs (RTE_HAS_CPUSET) under _GNU_SOURCE.
+        let mut argument = vec!["-march=native".into(), "-D_GNU_SOURCE".into()];
         argument.extend(
             self.include_path
                 .iter()
@@ -776,6 +777,7 @@ impl State {
             .clang_arg("-imacros")
             .clang_arg(dpdk_config_path.to_str().unwrap())
             .clang_arg("-march=native")
+            .clang_arg("-D_GNU_SOURCE")
             .clang_arg("-Wno-everything")
             .opaque_type("max_align_t")
             .opaque_type("rte_event.*")
@@ -877,7 +879,8 @@ impl State {
             .includes(&self.include_path)
             .include(&self.out_path)
             .flag("-w") // hide warnings
-            .flag("-march=native");
+            .flag("-march=native")
+            .flag("-D_GNU_SOURCE");
         // Every static inline gets a wrapper, including the TSX ones (rte_xbegin,
         // rte_try_tm, ...). They fail to build on CPUs without RTM; DPDK only calls
         // them after a runtime rte_rtm_supported() check, so enabling RTM is safe.
