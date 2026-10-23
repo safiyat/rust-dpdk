@@ -837,9 +837,14 @@ impl State {
                 .join("\n"),
         );
 
-        if formatted_string.contains("rte_get_main_lcore") {
+        // Since DPDK 21.x rte_get_main_lcore is an exported (not static inline)
+        // function, so it only shows up in the bindgen output.
+        let bindings = std::fs::read_to_string(self.out_path.join("dpdk.rs")).unwrap_or_default();
+        let defines = |name: &str| formatted_string.contains(name) || bindings.contains(name);
+        println!(r#"cargo:rustc-check-cfg=cfg(main_lcore_name, values("main", "master"))"#);
+        if defines("rte_get_main_lcore") {
             println!(r#"cargo:rustc-cfg=main_lcore_name="main""#);
-        } else if formatted_string.contains("rte_get_master_lcore") {
+        } else if defines("rte_get_master_lcore") {
             println!(r#"cargo:rustc-cfg=main_lcore_name="master""#);
         } else {
             panic!("neither rte_get_main_lcore nor rte_get_master_lcore found");
