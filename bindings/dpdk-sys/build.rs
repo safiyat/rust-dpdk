@@ -292,7 +292,9 @@ impl State {
     fn make_all_in_one_header(&mut self) {
         let dpdk_config = self.dpdk_config.as_ref().unwrap();
         // dlb drivers have duplicated enum definitions.
-        let blacklist = vec!["rte_pmd_dlb", "rte_pmd_dlb2"];
+        // rte_crc_generic is an arch fallback that rte_hash_crc includes itself;
+        // pulling it in directly redefines the arch-specific CRC functions.
+        let blacklist = vec!["rte_pmd_dlb", "rte_pmd_dlb2", "rte_crc_generic"];
         let mut headers = vec![];
         for entry in self
             .include_path
@@ -775,7 +777,6 @@ impl State {
             .clang_arg(dpdk_config_path.to_str().unwrap())
             .clang_arg("-march=native")
             .clang_arg("-Wno-everything")
-            .rustfmt_bindings(true)
             .opaque_type("max_align_t")
             .opaque_type("rte_event.*")
             .generate()
