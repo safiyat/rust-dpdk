@@ -779,6 +779,14 @@ impl State {
             .clang_arg("-Wno-everything")
             .opaque_type("max_align_t")
             .opaque_type("rte_event.*")
+            // Packed + aligned, or packed containing an aligned type (rte_ether_addr):
+            // neither can be expressed in Rust.
+            .opaque_type("__tile1024i_str")
+            .opaque_type("rte_avp_desc")
+            .opaque_type("rte_arp_ipv4")
+            .opaque_type("rte_arp_hdr")
+            // Its packed rte_gtp_psc_generic_hdr field cannot derive Debug.
+            .no_debug("rte_flow_item_gtp_psc")
             .generate()
             .unwrap()
             .write_to_file(target_path)
