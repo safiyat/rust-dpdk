@@ -860,7 +860,8 @@ impl State {
         let source_path = self.out_path.join("static.c");
         let lib_path = self.library_path.as_ref().unwrap();
 
-        cc::Build::new()
+        let mut build = cc::Build::new();
+        build
             .file(source_path)
             .static_flag(true)
             .shared_flag(false)
@@ -868,7 +869,14 @@ impl State {
             .includes(&self.include_path)
             .include(&self.out_path)
             .flag("-w") // hide warnings
-            .flag("-march=native")
+            .flag("-march=native");
+        // Every static inline gets a wrapper, including the TSX ones (rte_xbegin,
+        // rte_try_tm, ...). They fail to build on CPUs without RTM; DPDK only calls
+        // them after a runtime rte_rtm_supported() check, so enabling RTM is safe.
+        if self.machine_string.as_deref().map_or(false, |m| m.starts_with("x86_64")) {
+            build.flag("-mrtm");
+        }
+        build
             .flag("-imacros")
             .flag(dpdk_config.to_str().unwrap())
             .flag(&format!("-L{}", lib_path.to_str().unwrap()))
