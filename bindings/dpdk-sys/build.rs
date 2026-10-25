@@ -673,10 +673,10 @@ impl State {
         let mut linkable_whitelist: Vec<_> = vec![
             "rte_pmd_ixgbe_set_all_queues_drop_en", // ixgbe
             "rte_pmd_i40e_ping_vfs",                // i40e
-            "e1000_igb_init_log",                   // e1000
+            "igb_dev_free_queues",                  // e1000
             "ice_release_vsi",                      // ice
             "vmxnet3_dev_tx_queue_release",         // vmxnet3
-            "virtio_dev_pause",                     // virtio
+            "virtio_dev_close",                     // virtio
             "softnic_thread_free",                  // softnic
             // "ipn3ke_hw_tm_init", // ipn3ke (currently not enabled)
             // "mlx4_fd_set_non_blocking", // mlx4 (currently not enabled)
@@ -690,10 +690,10 @@ impl State {
 
         // List of non-static PMD-specific functions used to create symbolic dependencies to PMDs.
         let mut linkable_extern_def_list: Vec<_> = vec![
-            "void e1000_igb_init_log(void)",                           // e1000
+            "void igb_dev_free_queues(struct rte_eth_dev *dev)",       // e1000
             "int ice_release_vsi(struct ice_vsi *vsi)",                // ice
             "void vmxnet3_dev_tx_queue_release(void *txq)",            // vmxnet3
-            "int virtio_dev_pause(struct rte_eth_dev *dev)",           // virtio
+            "int virtio_dev_close(struct rte_eth_dev *dev)",           // virtio
             "void softnic_thread_free(struct pmd_internals *softnic)", // softnic
             // "int ipn3ke_hw_tm_init(struct ipn3ke_hw *hw)", // ipn3ke (currently not enabled)
             // "int mlx4_fd_set_non_blocking(int fd)", // mlx4 (currently not enabled)
@@ -899,7 +899,11 @@ impl State {
             lib_path.to_str().unwrap()
         );
 
-        // Legacy mode: Rust cargo cannot recognize library groups (libdpdk.a).
+        // Link every DPDK library whole, as DPDK's own static pkg-config does
+        // for drivers: buses and PMDs register themselves from constructors in
+        // objects nothing references (e.g. virtio's PCI driver), so a plain
+        // static link drops them and EAL cannot even parse a PCI address.
+        // --gc-sections still removes unused code; constructors are roots.
         let format = Regex::new(r"lib(.*)\.(a)").unwrap();
         for link in &self.dpdk_links {
             let lib_name = link.file_name().unwrap().to_str().unwrap();
@@ -908,16 +912,43 @@ impl State {
                 let link_name = &capture[1];
                 if link_name == "dpdk" {
                     continue;
-                } else if link_name == "rte_pmd_mlx5" {
-                    // MLX5 PMD requires additional liniking of two libraries
-                    println!("cargo:rustc-link-lib=ibverbs");
-                    println!("cargo:rustc-link-lib=mlx5");
                 }
-                println!("cargo:rustc-link-lib=static={}", link_name);
+                println!("cargo:rustc-link-lib=static:+whole-archive={}", link_name);
             }
+        }
+
+        // System libraries the whole-archived objects need (zlib, libcrypto,
+        // ibverbs, ...), from DPDK's own static link line when available
+        for lib in dpdk_system_libs() {
+            println!("cargo:rustc-link-lib={}", lib);
         }
         println!("cargo:rustc-link-lib=numa");
     }
+}
+
+/// System (non-DPDK) libraries from `pkg-config --static --libs libdpdk`
+fn dpdk_system_libs() -> Vec<String> {
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
+    let output = match Command::new("pkg-config").args(["--static", "--libs", "libdpdk"]).output() {
+        Ok(output) if output.status.success() => output,
+        _ => {
+            println!("cargo:warning=pkg-config libdpdk unavailable; linking without DPDK's system library list");
+            return vec![];
+        }
+    };
+    let mut libs: Vec<String> = Vec::new();
+    for token in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+        if let Some(name) = token.strip_prefix("-l") {
+            // ":librte_*.a" entries and rte_* libraries are linked above
+            if name.starts_with(':') || name.starts_with("rte_") || name == "dpdk" {
+                continue;
+            }
+            if !libs.iter().any(|l| l == name) {
+                libs.push(name.to_string());
+            }
+        }
+    }
+    libs
 }
 
 fn main() {
