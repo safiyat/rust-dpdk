@@ -917,8 +917,8 @@ impl State {
             }
         }
 
-        // System libraries the whole-archived objects need (zlib, libcrypto,
-        // ibverbs, ...), from DPDK's own static link line when available
+        // System libraries the whole-archived objects need (libcrypto, ibverbs,
+        // libpcap, ...), linked dynamically
         for lib in dpdk_system_libs() {
             println!("cargo:rustc-link-lib={}", lib);
         }
@@ -926,19 +926,54 @@ impl State {
     }
 }
 
-/// System (non-DPDK) libraries from `pkg-config --static --libs libdpdk`
+/// System libraries DPDK's static libraries call into, linked dynamically.
+///
+/// `pkg-config --static --libs libdpdk` is too broad: it also pulls the
+/// static-only dependencies of DPDK's dependencies (e.g. libpcap's dbus and
+/// systemd, libibverbs' RDMA providers), which a dynamic link doesn't need.
+/// Instead take the plain -l flags in DPDK's own .pc files, plus the dynamic
+/// `--libs` of each package they require.
 fn dpdk_system_libs() -> Vec<String> {
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
-    let output = match Command::new("pkg-config").args(["--static", "--libs", "libdpdk"]).output() {
-        Ok(output) if output.status.success() => output,
-        _ => {
+    let pkg_config = |args: &[&str]| -> Option<String> {
+        let output = Command::new("pkg-config").args(args).output().ok()?;
+        output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let pc_dir = match pkg_config(&["--variable=pcfiledir", "libdpdk"]) {
+        Some(dir) => PathBuf::from(dir.trim()),
+        None => {
             println!("cargo:warning=pkg-config libdpdk unavailable; linking without DPDK's system library list");
             return vec![];
         }
     };
+
+    let mut flags: Vec<String> = Vec::new();
+    for pc in ["libdpdk.pc", "libdpdk-libs.pc"] {
+        let text = std::fs::read_to_string(pc_dir.join(pc)).unwrap_or_default();
+        for line in text.lines() {
+            if let Some(libs) = line.strip_prefix("Libs.private:") {
+                flags.extend(libs.split_whitespace().map(String::from));
+            } else if let Some(reqs) = line
+                .strip_prefix("Requires.private:")
+                .or_else(|| line.strip_prefix("Requires:"))
+            {
+                for req in reqs.split(',') {
+                    // "libpcap >= 1.0" -> "libpcap"; DPDK's own packages are linked above
+                    let name = match req.split_whitespace().next() {
+                        Some(name) if !name.starts_with("libdpdk") => name,
+                        _ => continue,
+                    };
+                    if let Some(libs) = pkg_config(&["--libs", name]) {
+                        flags.extend(libs.split_whitespace().map(String::from));
+                    }
+                }
+            }
+        }
+    }
+
     let mut libs: Vec<String> = Vec::new();
-    for token in String::from_utf8_lossy(&output.stdout).split_whitespace() {
-        if let Some(name) = token.strip_prefix("-l") {
+    for flag in flags {
+        if let Some(name) = flag.strip_prefix("-l") {
             // ":librte_*.a" entries and rte_* libraries are linked above
             if name.starts_with(':') || name.starts_with("rte_") || name == "dpdk" {
                 continue;
