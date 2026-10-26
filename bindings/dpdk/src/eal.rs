@@ -197,14 +197,13 @@ impl Port {
         self.inner.port_id
     }
 
-    /// Returns NUMA node of current port.
+    /// Returns NUMA node of current port, or `None` when DPDK doesn't know it
+    /// (`SOCKET_ID_ANY`, e.g. a VF passed through to a VM without NUMA info).
     #[inline]
-    pub fn socket_id(&self) -> SocketId {
-        SocketId::new(unsafe {
-            dpdk_sys::rte_eth_dev_socket_id(self.inner.port_id)
-                .try_into()
-                .unwrap()
-        })
+    pub fn socket_id(&self) -> Option<SocketId> {
+        // Safety: foreign function.
+        let id = unsafe { dpdk_sys::rte_eth_dev_socket_id(self.inner.port_id) };
+        u32::try_from(id).ok().map(SocketId::new)
     }
 
     /// Returns NUMA node of current port.
@@ -464,6 +463,9 @@ impl UninitPort {
                 port_conf.data.rx_adv_conf.rss_conf.rss_hf = (1u64
                     << dpdk_sys::RTE_ETH_FLOW_NONFRAG_IPV4_UDP)
                     | (1u64 << dpdk_sys::RTE_ETH_FLOW_NONFRAG_IPV4_TCP);
+                // Only the hash types the device supports (many VFs hash fewer
+                // fields); rte_eth_dev_configure rejects anything else
+                port_conf.data.rx_adv_conf.rss_conf.rss_hf &= dev_info.flow_type_rss_offloads;
                 // TODO set symmetric RSS for TCP/IP
             }
             port_conf
@@ -480,6 +482,10 @@ impl UninitPort {
         };
         assert_eq!(ret, 0);
 
+        // Rings and RX pools go on the port's socket, or any socket when it's unknown
+        let socket = port.socket_id();
+        let ring_socket: u32 = socket.map_or(dpdk_sys::SOCKET_ID_ANY as u32, Into::into);
+
         let rxq = (0..rx_queue_count)
             .map(|queue_id| {
                 let mpool = port.inner.eal.create_mpool(
@@ -487,14 +493,14 @@ impl UninitPort {
                     DEFAULT_RX_POOL_SIZE,
                     DEFAULT_RX_PER_CORE_CACHE,
                     DEFAULT_PACKET_DATA_LENGTH,
-                    Some(port.socket_id()),
+                    socket,
                 );
                 let ret = unsafe {
                     dpdk_sys::rte_eth_rx_queue_setup(
                         port.inner.port_id,
                         queue_id,
                         DEFAULT_RX_DESC,
-                        port.socket_id().into(),
+                        ring_socket,
                         &dev_info.default_rxconf,
                         mpool.inner.ptr.as_ptr(),
                     )
@@ -516,7 +522,7 @@ impl UninitPort {
                         port.inner.port_id,
                         queue_id,
                         DEFAULT_RX_DESC,
-                        port.socket_id().into(),
+                        ring_socket,
                         &dev_info.default_txconf,
                     )
                 };
